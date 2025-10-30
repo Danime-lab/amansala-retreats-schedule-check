@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Retreat Resource Scheduler</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, collection, addDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        
+        // --- IMPORTANT: FIREBASE SETUP ---
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const appId = typeof __app_id !== 'undefined' ? 'default-app-id' : 'default-app-id';
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        setLogLevel('debug');
+
+        // --- GLOBAL STATE ---
+        window.db = db;
+        window.auth = auth;
+        window.appId = appId;
+        window.userId = null;
+        
+        // --- AUTHENTICATION ---
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                console.log("User is signed in:", user.uid);
+                window.userId = user.uid;
+            } else {
+                console.log("User is signed out. Attempting to sign in.");
+                try {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (error) {
+                    console.error("Error during sign-in:", error);
+                    document.getElementById('status').innerText = 'Error: Could not authenticate with the database.';
+                }
+            }
+        });
+
+    </script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-50 flex items-center justify-center min-h-screen">
+
+    <div class="bg-white p-8 rounded-2xl shadow-lg max-w-lg w-full">
+        <img src="https://www.amansala.com/images/amansala-logo-x2.png" alt="Amansala Logo" class="mx-auto h-12 mb-4" onerror="this.style.display='none'">
+        <h1 class="text-3xl font-bold text-gray-800 mb-2 text-center">Retreat Resource Scheduler</h1>
+        <p class="text-gray-500 mb-6 text-center">Select multiple Google Doc schedules to find booking conflicts and generate a consolidated report.</p>
+
+        <button id="authorize_button" onclick="handleSchedulerAuthClick()" class="bg-blue-600 text-white font-bold py-3 px-6 rounded-lg hover:bg-blue-700 transition-all duration-300 w-full text-lg shadow-md hover:shadow-lg focus:outline-none focus:ring-4 focus:ring-blue-300">
+            Select Schedules & Generate Summary
+        </button>
+
+        <div id="status" class="mt-6 text-gray-600 text-sm h-auto min-h-10 flex items-center justify-center p-2 text-center"></div>
+        
+        <div id="result" class="mt-4 text-center"></div>
+        
+        <div id="debug_output" class="hidden mt-4 text-left">
+            <h3 class="font-bold text-red-700">Debug Information</h3>
+            <p class="text-xs text-gray-500 mb-2">The program failed to find events. This is likely due to an unexpected document format. Please copy the text below and share it for analysis.</p>
+            <textarea id="debug_textarea" class="w-full h-48 p-2 border rounded bg-gray-100 font-mono text-xs" readonly></textarea>
+        </div>
+    </div>
+
+    <script async defer src="https://apis.google.com/js/api.js" onload="gapiSchedulerLoaded()"></script>
+    <script async defer src="https://accounts.google.com/gsi/client" onload="gisSchedulerLoaded()"></script>
+
+    <script type="text/javascript">
+    // IIFE to create a private scope and prevent conflicts with other scripts.
+    (function() {
+        // --- IMPORTANT: CONFIGURATION (FROM YOUR SCRIPT) ---
+        const API_KEY = 'AIzaSyD_2KFWZ-r6D3wm_1KVt0gvy8WkeLGUXcE';
+        const CLIENT_ID = '5238753048-sedi66kvp746e28avm70i181mom2as3h.apps.googleusercontent.com';
+        const APP_ID = CLIENT_ID.split('-')[0];
+        const SCOPES = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/documents';
+
+        let tokenClient;
+        let gapiInited = false;
+        let gisInited = false;
+        window.lastExtractedText = ''; // Variable to hold text for debugging
+
+        // --- GOOGLE API INITIALIZATION (FROM YOUR SCRIPT) ---
+        window.gapiSchedulerLoaded = function() {
+            gapi.load('client:picker', initializeGapiClient);
+        }
+
+        async function initializeGapiClient() {
+            await gapi.client.init({
+                apiKey: API_KEY,
+                discoveryDocs: [
+                    "https://docs.googleapis.com/$discovery/rest?version=v1",
+                    "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"
+                ],
+            });
+            gapiInited = true;
+            maybeEnableButtons();
+        }
+
+        window.gisSchedulerLoaded = function() {
+            tokenClient = google.accounts.oauth2.initTokenClient({
+                client_id: CLIENT_ID,
+                scope: SCOPES,
+                callback: '', 
+            });
+            gisInited = true;
+            maybeEnableButtons();
+        }
+
+        function maybeEnableButtons() {
+            if (gapiInited && gisInited) {
+                document.getElementById('authorize_button').style.visibility = 'visible';
+            }
+        }
+        
+        // --- BUTTON HANDLER (FROM YOUR SCRIPT) ---
+        window.handleSchedulerAuthClick = function() {
+            tokenClient.callback = async (resp) => {
+                if (resp.error !== undefined) {
+                    throw (resp);
+                }
+                setStatus('Authentication successful. Opening file picker...');
+                createPicker();
+            };
+
+            if (gapi.client.getToken() === null) {
+                tokenClient.requestAccessToken({prompt: 'consent'});
+            } else {
+                tokenClient.requestAccessToken({prompt: ''});
+            }
+        }
+
+        function createPicker() {
+            const view = new google.picker.View(google.picker.ViewId.DOCS);
+            view.setMimeTypes("application/vnd.google-apps.document");
+            const picker = new google.picker.PickerBuilder()
+                .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
+                .setAppId(APP_ID)
+                .setOAuthToken(gapi.client.getToken().access_token)
+                .addView(view)
+                .setDeveloperKey(API_KEY)
+                .setCallback(pickerCallback)
+                .build();
+            picker.setVisible(true);
+        }
+
+        // --- CORE LOGIC ---
+        async function pickerCallback(data) {
+            if (data.action === google.picker.Action.PICKED) {
+                const fileIds = data.docs.map(doc => doc.id);
+                setStatus('Documents selected. Processing...');
+                document.getElementById('result').innerHTML = '';
+                
+                try {
+                    let allEvents = [];
+                    let combinedTextForDebug = '';
+                    setStatus(`Reading ${fileIds.length} documents...`);
+                    
+                    for (const fileId of fileIds) {
+                        const doc = await fetchDocContent(fileId);
+                        // Using ENHANCED parsing logic
+                        const { events, fullText } = parseScheduleContent(doc);
+                        allEvents.push(...events);
+                        combinedTextForDebug += `--- DOC ID: ${fileId} ---\n${fullText}\n\n`;
+                    }
+                    window.lastExtractedText = combinedTextForDebug;
+                    
+                    if (allEvents.length === 0) {
+                        throw new Error("Could not parse any events. Please check the document format.");
+                    }
+
+                    setStatus('Detecting conflicts...');
+                    // Using ENHANCED conflict detection
+                    const eventsWithConflicts = detectConflicts(allEvents);
+
+                    setStatus('Creating Google Doc summary...');
+                    // Using NEW function to create the summary document
+                    const reportDoc = await createSummaryReportDoc(eventsWithConflicts);
+                    
+                    setStatus('Summary created successfully!', 'success');
+                    const reportUrl = `https://docs.google.com/document/d/${reportDoc.documentId}`;
+                    displayResultLink(reportUrl);
+
+                } catch (error) {
+                    console.error('Error during processing:', error);
+                    const errorMessage = error.result ? error.result.error.message : (error.message || JSON.stringify(error));
+                    setStatus(`Error: ${errorMessage}`, 'error');
+                    if (error.message.includes("Could not parse")) {
+                         document.getElementById('debug_textarea').value = window.lastExtractedText;
+                         document.getElementById('debug_output').classList.remove('hidden');
+                    }
+                }
+            }
+        }
+        
+        async function fetchDocContent(fileId) {
+            const response = await gapi.client.docs.documents.get({
+                documentId: fileId,
+            });
+            return response.result;
+        }
+
+        // --- MODIFIED SECTION: ENHANCED PARSING AND REPORTING ---
+
+        // ENHANCED: More resilient data parsing logic
+        function parseScheduleContent(doc) {
+            let fullText = '';
+            doc.body.content.forEach(element => {
+                if (element.paragraph) {
+                    element.paragraph.elements.forEach(el => {
+                        if (el.textRun) {
+                            fullText += el.textRun.content;
+                        }
+                    });
+                }
+            });
+
+            const events = [];
+            const lines = fullText.split('\n');
+            let currentRetreat = doc.title;
+            let currentDate = '';
+            
+            const knownResources = ["Grande", "Chica", "Beachfront", "Rooftop", "ChicaRooftop", "Tulum Ruins", "Temazcal", "Gran Cenote", "Cenote", "Mangrove Tour", "Icebath", "Ice bath", "Mayan Clay", "Salsa", "Fire pit", "Offsite"];
+            const resourceRegex = new RegExp(`\\b(${knownResources.join('|')})\\b`, 'i');
+            
+            const retreatNameMatch = fullText.substring(0, 200).match(/(.*?)(\||Oct|Sep|Nov|Dec|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug)/);
+            if (retreatNameMatch && retreatNameMatch[1].trim().length > 3 && retreatNameMatch[1].trim().length < 50) {
+                currentRetreat = retreatNameMatch[1].trim();
+            }
+
+            lines.forEach(line => {
+                line = line.trim();
+                if (!line) return;
+
+                const dateMatch = line.match(/^(?:Mon|Tues|Wed|Thurs|Fri|Sat|Sun|Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\w*[,|\s]*(\w+\s+\d{1,2})/i);
+                if (dateMatch) {
+                    const monthAndDay = dateMatch[1];
+                    const year = new Date().getFullYear();
+                    const parsedDate = new Date(`${monthAndDay} ${year}`);
+                    if (!isNaN(parsedDate)) {
+                        const month = (parsedDate.getMonth() + 1).toString().padStart(2, '0');
+                        const day = parsedDate.getDate().toString().padStart(2, '0');
+                        currentDate = `${year}-${month}-${day}`;
+                    }
+                    return; 
+                }
+
+                const timeRegex = /(\d{1,2}:\d{2})\s*(?:-|–|to)\s*(\d{1,2}:\d{2})|(\d{1,2}:\d{2})/;
+                const timeMatch = line.match(timeRegex);
+
+                if (timeMatch && currentDate) {
+                    let startTime = timeMatch[1] || timeMatch[3];
+                    let endTime = timeMatch[2];
+                    let description = line.replace(timeRegex, '').replace(/\|/g, ' ').trim();
+                    
+                    if (!endTime) {
+                        let start = new Date(`${currentDate}T${startTime}`);
+                        if(!isNaN(start)){
+                            start.setHours(start.getHours() + 1);
+                            endTime = start.toTimeString().substring(0, 5);
+                        } else {
+                            endTime = startTime; 
+                        }
+                    }
+
+                    let resource = 'TBD';
+                    const resourceMatch = description.match(resourceRegex) || line.match(resourceRegex);
+                    if (resourceMatch) {
+                        resource = resourceMatch[0].trim();
+                        if (resource.toLowerCase().includes('chica') && resource.toLowerCase().includes('rooftop')) resource = 'Chica Rooftop';
+                        else if (resource.toLowerCase().includes('chica')) resource = 'Chica';
+                        else if (resource.toLowerCase().includes('ice')) resource = 'Ice Bath';
+                        description = description.replace(resource, '').trim();
+                    }
+                    
+                    description = description.replace(/^[:-\s|]+/, '').trim();
+
+                    events.push({
+                        date: currentDate,
+                        startTime: startTime,
+                        endTime: endTime,
+                        resource: resource,
+                        retreat: currentRetreat,
+                        description: description,
+                        isConflict: false
+                    });
+                }
+            });
+            return { events, fullText };
+        }
+
+        // ENHANCED: Better conflict detection
+        function detectConflicts(allEvents) {
+            allEvents.sort((a, b) => {
+                if (a.date < b.date) return -1; if (a.date > b.date) return 1;
+                if (a.resource.toLowerCase() < b.resource.toLowerCase()) return -1; if (a.resource.toLowerCase() > b.resource.toLowerCase()) return 1;
+                if (a.startTime < b.startTime) return -1; if (a.startTime > b.startTime) return 1;
+                return 0;
+            });
+
+            for (let i = 0; i < allEvents.length - 1; i++) {
+                const eventA = allEvents[i];
+                const eventB = allEvents[i + 1];
+
+                if (eventA.resource === 'TBD' || eventA.resource.toLowerCase() === 'offsite') continue;
+
+                if (eventA.date === eventB.date && eventA.resource.toLowerCase() === eventB.resource.toLowerCase()) {
+                    try {
+                        const startB = new Date(`${eventB.date}T${eventB.startTime}`);
+                        const endA = new Date(`${eventA.date}T${eventA.endTime}`);
+                        if (!isNaN(startB) && !isNaN(endA) && startB < endA) {
+                            eventA.isConflict = true;
+                            eventB.isConflict = true;
+                        }
+                    } catch (e) {
+                        console.error("Could not parse date for conflict detection:", e);
+                    }
+                }
+            }
+            return allEvents;
+        }
+
+        // NEW: Function to create the clean, grouped summary report
+        async function createSummaryReportDoc(events) {
+            const docTitle = `Amansala Consolidated Schedule - Generated ${new Date().toLocaleDateString()}`;
+            const createResponse = await gapi.client.docs.documents.create({ title: docTitle });
+            const documentId = createResponse.result.documentId;
+            let requests = [];
+            let currentIndex = 1;
+
+            const titleText = `Consolidated Resource Schedule\n`;
+            requests.push({ insertText: { location: { index: currentIndex }, text: titleText } });
+            requests.push({ updateParagraphStyle: { range: { startIndex: 1, endIndex: titleText.length }, paragraphStyle: { namedStyleType: 'TITLE' }, fields: 'namedStyleType' } });
+            currentIndex += titleText.length;
+            
+            const conflicts = events.filter(e => e.isConflict);
+            if (conflicts.length > 0) {
+                const conflictHeaderText = `Conflict Summary\n`;
+                requests.push({ insertText: { location: { index: currentIndex }, text: conflictHeaderText } });
+                requests.push({ updateParagraphStyle: { range: { startIndex: currentIndex, endIndex: currentIndex + conflictHeaderText.length }, paragraphStyle: { namedStyleType: 'HEADING_1' }, fields: 'namedStyleType' }});
+                currentIndex += conflictHeaderText.length;
+                let uniqueConflicts = {};
+                conflicts.forEach(event => {
+                    const key = `${event.date}-${event.resource}`;
+                    if (!uniqueConflicts[key]) uniqueConflicts[key] = [];
+                    uniqueConflicts[key].push(event);
+                });
+                for (const key in uniqueConflicts) {
+                    const conflictingEvents = uniqueConflicts[key];
+                    const { date, resource } = conflictingEvents[0];
+                    const dateObj = new Date(date + "T00:00:00");
+                    const dateString = dateObj.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+                    const conflictSummaryText = `⚠️ ${resource} on ${dateString}\n`;
+                    requests.push({ insertText: { location: { index: currentIndex }, text: conflictSummaryText } });
+                    requests.push({ updateTextStyle: { range: { startIndex: currentIndex, endIndex: currentIndex + conflictSummaryText.length -1 }, textStyle: { bold: true }, fields: 'bold' } });
+                    currentIndex += conflictSummaryText.length;
+                    conflictingEvents.forEach(event => {
+                        const eventLine = `\t• ${event.startTime} - ${event.endTime} | ${event.retreat} (${event.description})\n`;
+                        requests.push({ insertText: { location: { index: currentIndex }, text: eventLine } });
+                        requests.push({ updateTextStyle: { range: { startIndex: currentIndex, endIndex: currentIndex + eventLine.length }, textStyle: { foregroundColor: { color: { rgbColor: { red: 1.0, green: 0.0, blue: 0.0 } } } }, fields: 'foregroundColor' } });
+                        currentIndex += eventLine.length;
+                    });
+                }
+                requests.push({ insertText: { location: { index: currentIndex }, text: '\n' } });
+                currentIndex++;
+            }
+
+            const groupedByDate = events.reduce((acc, event) => {
+                (acc[event.date] = acc[event.date] || []).push(event);
+                return acc;
+            }, {});
+            for (const date in groupedByDate) {
+                const dateObj = new Date(date + "T00:00:00");
+                const dateString = dateObj.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+                const dateText = `${dateString}\n`;
+                requests.push({ insertText: { location: { index: currentIndex }, text: dateText } });
+                requests.push({ updateParagraphStyle: { range: { startIndex: currentIndex, endIndex: currentIndex + dateText.length }, paragraphStyle: { namedStyleType: 'HEADING_1' }, fields: 'namedStyleType' } });
+                currentIndex += dateText.length;
+                const groupedByResource = groupedByDate[date].reduce((acc, event) => {
+                    (acc[event.resource] = acc[event.resource] || []).push(event);
+                    return acc;
+                }, {});
+                for (const resource in groupedByResource) {
+                    const resourceText = `${resource}\n`;
+                    requests.push({ insertText: { location: { index: currentIndex }, text: resourceText } });
+                    requests.push({ updateParagraphStyle: { range: { startIndex: currentIndex, endIndex: currentIndex + resourceText.length }, paragraphStyle: { namedStyleType: 'HEADING_2' }, fields: 'namedStyleType' } });
+                    currentIndex += resourceText.length;
+                    groupedByResource[resource].forEach(event => {
+                        const eventText = `\t• ${event.startTime} - ${event.endTime} | ${event.retreat} (${event.description})\n`;
+                        requests.push({ insertText: { location: { index: currentIndex }, text: eventText } });
+                        if (event.isConflict) {
+                            requests.push({ updateTextStyle: { range: { startIndex: currentIndex, endIndex: currentIndex + eventText.length }, textStyle: { foregroundColor: { color: { rgbColor: { red: 1.0, green: 0.0, blue: 0.0 } } } }, fields: 'foregroundColor' } });
+                        }
+                        currentIndex += eventText.length;
+                    });
+                }
+                requests.push({ insertText: { location: { index: currentIndex }, text: '\n' } });
+                currentIndex += 1;
+            }
+
+            await gapi.client.docs.documents.batchUpdate({
+                documentId: documentId,
+                resource: { requests: requests }
+            });
+            return createResponse.result;
+        }
+
+        // --- UI HELPER FUNCTIONS (FROM YOUR SCRIPT) ---
+        function setStatus(message, type = 'info') {
+            const statusEl = document.getElementById('status');
+            statusEl.innerText = message;
+            statusEl.classList.remove('text-green-600', 'text-red-600', 'text-gray-600');
+            if (type === 'success') {
+                statusEl.classList.add('text-green-600');
+                document.getElementById('debug_output').classList.add('hidden');
+            } else if (type === 'error') {
+                statusEl.classList.add('text-red-600');
+            } else {
+                statusEl.classList.add('text-gray-600');
+                document.getElementById('debug_output').classList.add('hidden');
+            }
+        }
+
+        function displayResultLink(url) {
+            const resultEl = document.getElementById('result');
+            resultEl.innerHTML = `
+                <a href="${url}" target="_blank" class="inline-block bg-green-100 text-green-800 font-semibold py-2 px-4 rounded-lg border border-green-300 hover:bg-green-200 transition-all">
+                    Open Your New Google Doc Summary
+                </a>
+            `;
+        }
+    })(); // End of the IIFE wrapper
+    </script>
+</body>
+</html>
